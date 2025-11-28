@@ -51,7 +51,15 @@ class QCApp(tk.Tk):
             grouped = organize_results(allres)
 
             out_path = os.path.join(folder, f"{jobno}_QC_Report.pdf")
+<<<<<<< ours
+<<<<<<< ours
+            generate_qc_pdf_report(out_path, grouped, allres, jobno)
+=======
+            generate_qc_pdf_report(out_path, grouped, allres, jobno, txt_data=txt, pdf_data=pdf, rb_data=rb)
+>>>>>>> theirs
+=======
             generate_qc_pdf_report(out_path, grouped, allres)
+>>>>>>> theirs
 
             self.out.configure(text=f"QC Complete\nReport: {out_path}")
             if messagebox.askyesno("Open","Open folder?"):

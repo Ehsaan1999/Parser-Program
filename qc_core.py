@@ -594,7 +594,15 @@ def organize_results(results):
 # Module 5A: PDF Report Setup
 # ============================
 
+<<<<<<< ours
+<<<<<<< ours
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+=======
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+>>>>>>> theirs
+=======
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+>>>>>>> theirs
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib import colors
@@ -605,6 +613,37 @@ def _shorten(s, limit=120):
     s = str(s).strip()
     return s if len(s) <= limit else s[:limit] + "..."
 
+<<<<<<< ours
+
+def _status_icon(status):
+    mapping = {
+<<<<<<< ours
+        "EXACT_MATCH": "✅",
+        "PARTIAL_MATCH": "❗",
+        "NO_MATCH": "❌",
+        "MISSING": "N/A",
+=======
+        "EXACT_MATCH": "Exact Match",
+        "PARTIAL_MATCH": "Partial Match",
+        "NO_MATCH": "No Match",
+        "MISSING": "Missing",
+>>>>>>> theirs
+        "N/A": "N/A",
+        "": "N/A",
+    }
+    return mapping.get(status, status or "N/A")
+
+
+def _status_color(status):
+    return {
+        "EXACT_MATCH": colors.lightgreen,
+        "PARTIAL_MATCH": colors.lightyellow,
+        "NO_MATCH": colors.salmon,
+        "MISSING": colors.whitesmoke,
+    }.get(status, colors.whitesmoke)
+
+=======
+>>>>>>> theirs
 class PDFReportBuilder:
     def __init__(self, path):
         self.path = path
@@ -621,9 +660,18 @@ class PDFReportBuilder:
 
     def build(self, summary_groups, all_results):
         story = []
+<<<<<<< ours
+        self._add_summary_page(story, summary_groups, all_results)
+<<<<<<< ours
+=======
+        if extraction_data:
+            self._add_detail_pages(story, extraction_data)
+>>>>>>> theirs
+=======
         self._add_summary_page(story, summary_groups)
         story.append(PageBreak())
         self._add_detail_pages(story, all_results)
+>>>>>>> theirs
         doc = SimpleDocTemplate(self.path, pagesize=LETTER,
                                 rightMargin=40, leftMargin=40,
                                 topMargin=40, bottomMargin=40)
@@ -633,15 +681,60 @@ class PDFReportBuilder:
     def _add_summary_page(self, story, groups):
         pass  # Implemented in Module 5B
 
+<<<<<<< ours
+<<<<<<< ours
+    def _add_detail_pages(self, story, all_results):
+        pass  # Reserved (not used in template-aligned layout)
+=======
+    def _add_detail_pages(self, story, extraction_data):
+        for idx, (source, sections) in enumerate(extraction_data):
+            story.append(PageBreak())
+            story.append(Paragraph(f"{source} Extraction", self.header_style))
+            story.append(Spacer(1, 8))
+
+            for section_name, values in sections:
+                if not values:
+                    continue
+                story.append(Paragraph(section_name, self.styles.get("Heading3")))
+                table_data = [["Field", "Value"]]
+                table_styles = [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, 0), 11),
+                    ("FONTSIZE", (0, 1), (-1, -1), 10),
+                ]
+
+                for k, v in values.items():
+                    table_data.append([k, _shorten(v, 500)])
+
+                table = Table(table_data, colWidths=[200, 330])
+                table.setStyle(TableStyle(table_styles))
+                story.append(table)
+                story.append(Spacer(1, 12))
+>>>>>>> theirs
+=======
     def _add_detail_pages(self, story, all_results):
         pass  # Implemented in Module 5C
+>>>>>>> theirs
 
 # ============================
 # Module 5B: Summary Page Builder
 # ============================
 
+<<<<<<< ours
+def PDFReportBuilder__add_summary_page(self, story, groups, all_results):
+    story.append(Paragraph("Gallo QC Report", self.title_style))
+    story.append(Paragraph(f"Job {self.job_number}", self.header_style))
+    story.append(Spacer(1, 12))
+<<<<<<< ours
+
+    story.append(Paragraph("Overall Status", self.header_style))
+=======
 def _section_header(builder, story, title):
     story.append(Paragraph(title, builder.header_style))
+>>>>>>> theirs
     story.append(Spacer(1, 6))
 
 def _summary_line(builder, story, result):
@@ -649,6 +742,24 @@ def _summary_line(builder, story, result):
     story.append(Paragraph(txt, builder.normal))
     story.append(Spacer(1, 3))
 
+<<<<<<< ours
+=======
+
+    story.append(Paragraph("Overall Status", self.header_style))
+    story.append(Spacer(1, 6))
+
+    exact_ct = len(groups.get("EXACT", []))
+    partial_ct = len(groups.get("PARTIAL", []))
+    no_ct = len(groups.get("NO", []))
+    missing_ct = len(groups.get("MISSING", []))
+    total_ct = exact_ct + partial_ct + no_ct + missing_ct
+    review_flag = "REVIEW REQUIRED" if (partial_ct or no_ct or missing_ct) else "OK"
+
+>>>>>>> theirs
+    summary_data = [
+        ["Status", "Exact", "Partial", "No Match", "Missing", "Total", "REVIEW REQUIRED"],
+        ["", str(exact_ct), str(partial_ct), str(no_ct), str(missing_ct), str(total_ct), review_flag]
+=======
 def PDFReportBuilder__add_summary_page(self, story, groups):
     story.append(Paragraph("QC Summary", self.title_style))
     story.append(Spacer(1, 12))
@@ -658,6 +769,7 @@ def PDFReportBuilder__add_summary_page(self, story, groups):
         ("PARTIAL", "Partial Matches"),
         ("NO", "No Matches"),
         ("MISSING", "Missing Items")
+>>>>>>> theirs
     ]
 
     for key, label in order_titles:
@@ -677,6 +789,40 @@ PDFReportBuilder._add_summary_page = PDFReportBuilder__add_summary_page
 # Module 5C: Detail Pages Builder
 # ============================
 
+<<<<<<< ours
+<<<<<<< ours
+def PDFReportBuilder__add_detail_pages(self, story, all_results):
+    pass  # No detail pages in template layout
+=======
+def PDFReportBuilder__add_detail_pages(self, story, extraction_data):
+    for idx, (source, sections) in enumerate(extraction_data):
+        story.append(PageBreak())
+        story.append(Paragraph(f"{source} Extraction", self.header_style))
+        story.append(Spacer(1, 8))
+
+        for section_name, values in sections:
+            if not values:
+                continue
+            story.append(Paragraph(section_name, self.styles.get("Heading3")))
+            table_data = [["Field", "Value"]]
+            table_styles = [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, 0), 11),
+                ("FONTSIZE", (0, 1), (-1, -1), 10),
+            ]
+
+            for k, v in values.items():
+                table_data.append([k, _shorten(v, 500)])
+
+            table = Table(table_data, colWidths=[200, 330])
+            table.setStyle(TableStyle(table_styles))
+            story.append(table)
+            story.append(Spacer(1, 12))
+>>>>>>> theirs
+=======
 def PDFReportBuilder__add_detail_pages(self, story, all_results):
     for r in sorted(all_results, key=lambda x: x.index):
         header = f"{r.index}. {r.group} – {r.field}: {r.status}"
@@ -697,6 +843,7 @@ def PDFReportBuilder__add_detail_pages(self, story, all_results):
 
         story.append(Paragraph(body, self.value_style))
         story.append(Spacer(1, 12))
+>>>>>>> theirs
 
 PDFReportBuilder._add_detail_pages = PDFReportBuilder__add_detail_pages
 
@@ -706,6 +853,46 @@ PDFReportBuilder._add_detail_pages = PDFReportBuilder__add_detail_pages
 
 import os
 
+<<<<<<< ours
+<<<<<<< ours
+def generate_qc_pdf_report(output_path, results_grouped, all_results, job_number="UNKNOWN"):
+    builder = PDFReportBuilder(output_path, job_number=job_number)
+    return builder.build(results_grouped, all_results)
+=======
+def _prepare_extraction_sections(txt_data, pdf_data, rb_data):
+    def to_str_map(d):
+        return {k: _shorten(v if isinstance(v, str) else str(v), 800) for k, v in d.items() if v not in (None, "", [])}
+
+    txt_sections = [
+        ("Title Page", to_str_map(txt_data.title)),
+        ("Appearances", to_str_map(txt_data.appearances)),
+        ("Indices", to_str_map(txt_data.indices)),
+        ("Exhibits", to_str_map(txt_data.exhibits)),
+        ("Ending", to_str_map(txt_data.ending)),
+        ("Disclosure", to_str_map(txt_data.disclosure)),
+        ("Certificate", to_str_map(txt_data.certificate)),
+    ]
+
+    pdf_sections = [("Notice", to_str_map(pdf_data))]
+
+    rb_sections = [("RB Fields", to_str_map(rb_data.fields))]
+
+    return [
+        ("TXT", txt_sections),
+        ("PDF", pdf_sections),
+        ("RB", rb_sections),
+    ]
+
+
+def generate_qc_pdf_report(output_path, results_grouped, all_results, job_number="UNKNOWN", txt_data=None, pdf_data=None, rb_data=None):
+    builder = PDFReportBuilder(output_path, job_number=job_number)
+    extraction_data = None
+    if txt_data is not None and pdf_data is not None and rb_data is not None:
+        extraction_data = _prepare_extraction_sections(txt_data, pdf_data, rb_data)
+    return builder.build(results_grouped, all_results, extraction_data=extraction_data)
+>>>>>>> theirs
+=======
 def generate_qc_pdf_report(output_path, results_grouped, all_results):
     builder = PDFReportBuilder(output_path)
     return builder.build(results_grouped, all_results)
+>>>>>>> theirs
