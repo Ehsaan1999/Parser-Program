@@ -65,7 +65,7 @@ class TXTParser:
             return m.group(0).strip() if m else ""
 
         # Basic patterns
-        data.title["court_heading"] = find(r"IN THE .*COURT.*")
+        data.title["court_heading"] = self._extract_court_heading_block(p1) or find(r"IN THE .*COURT.*")
         data.title["case_number"] = find(r"(202\d.*|20\d{2}.*|CIVIL ACTION.*|FILE NO.*)")
         data.title["case_style"] = self._find_case_style(joined)
 
@@ -89,6 +89,23 @@ class TXTParser:
         # Reporter
         m = re.search(r"Reported by\s+(.+)", joined, re.IGNORECASE)
         data.title["resource"] = m.group(1).strip() if m else ""
+
+    def _extract_court_heading_block(self, lines):
+        """Capture contiguous heading lines (e.g., two-line court heading)."""
+        stop_pattern = re.compile(r"Plaintiff|Defendant|Civil Action|File No|Case No", re.IGNORECASE)
+
+        for i, line in enumerate(lines):
+            if re.search(r"\bIN THE\b", line, re.IGNORECASE) and re.search(r"COURT", line, re.IGNORECASE):
+                heading_lines = []
+                for j in range(i, len(lines)):
+                    l = lines[j].strip()
+                    if not l:
+                        break
+                    if stop_pattern.search(l):
+                        break
+                    heading_lines.append(l)
+                return " ".join(heading_lines).strip()
+        return ""
 
     def _find_case_style(self, txt):
         # Grab block around Plaintiff/Defendant
@@ -225,17 +242,25 @@ class PDFParser:
     def load(self, path):
         data = {}
         text = ""
+        first_page_text = ""
         try:
             reader = PdfReader(path)
-            for page in reader.pages:
-                text += page.extract_text() or ""
+            for idx, page in enumerate(reader.pages):
+                page_text = page.extract_text() or ""
+                if idx == 0:
+                    first_page_text = page_text
+                text += page_text
         except:
             return data
 
         # Normalize
         normalized = re.sub(r'\s+', ' ', text)
 
-        data["court_heading"] = self._find(normalized, r"IN THE .*?COURT.*")
+        # Court heading: prefer first-page lines to avoid pulling case style text
+        first_page_lines = (first_page_text or "").splitlines()
+        data["court_heading"] = self._extract_court_heading_lines(first_page_lines)
+        if not data["court_heading"]:
+            data["court_heading"] = self._find(normalized, r"IN THE .*?COURT.*?(?=\s{2,}|Plaintiff|Defendant|Civil Action|File No|Case No)", flags=re.IGNORECASE)
         data["case_number"]   = self._find(normalized, r"(CIVIL ACTION FILE NO\.?|FILE NO\.?)\s*[#:]*\s*([A-Za-z0-9\-\/\.]+)", group=2)
         data["case_style"]    = self._find(normalized, r".+?,\s*Plaintiff.*?v\.?.+?,\s*Defendant", flags=re.IGNORECASE)
         data["witness_name"]  = self._find(normalized, r"Deposition of\s+(.+?)(?=[,\.])", group=1)
@@ -250,6 +275,21 @@ class PDFParser:
         if not m:
             return ""
         return m.group(group).strip()
+
+    def _extract_court_heading_lines(self, lines):
+        stop_pattern = re.compile(r"Plaintiff|Defendant|Civil Action|File No|Case No", re.IGNORECASE)
+        for i, line in enumerate(lines):
+            if re.search(r"\bIN THE\b", line, re.IGNORECASE) and re.search(r"COURT", line, re.IGNORECASE):
+                heading_lines = []
+                for j in range(i, len(lines)):
+                    l = lines[j].strip()
+                    if not l:
+                        break
+                    if stop_pattern.search(l):
+                        break
+                    heading_lines.append(l)
+                return " ".join(heading_lines).strip()
+        return ""
 
 
 
@@ -330,7 +370,7 @@ from datetime import datetime
 from dateutil import parser as dateparser
 
 class ComparisonResult:
-    def __init__(self, index, group, field, txt, pdf, rb, status, notes=""):
+    def __init__(self, index, group, field, txt, pdf, rb, status, notes="", pdf_status="", rb_status=""):
         self.index = index
         self.group = group
         self.field = field
@@ -339,6 +379,8 @@ class ComparisonResult:
         self.rb = rb or ""
         self.status = status
         self.notes = notes
+        self.pdf_status = pdf_status or ""
+        self.rb_status = rb_status or ""
 
 def normalize_ws(s):
     if not s:
@@ -387,34 +429,44 @@ def compare_text(index, group, field, txt, pdf, rb, notes=""):
 
     if not t_txt:
         status = "MISSING" if (t_pdf or t_rb) else "MISSING"
-        return ComparisonResult(index, group, field, t_txt, t_pdf, t_rb, status, notes)
+        return ComparisonResult(index, group, field, t_txt, t_pdf, t_rb, status, notes, pdf_status="N/A", rb_status="N/A")
 
     EXACT_THR = 0.90
     PARTIAL_THR = 0.60
 
     results = []
+    pdf_status = "N/A"
+    rb_status = "N/A"
 
     if t_pdf:
         s = similar(t_txt, t_pdf)
         if s >= EXACT_THR:
             results.append("PDF_EXACT")
+            pdf_status = "EXACT_MATCH"
         elif s >= PARTIAL_THR:
             results.append("PDF_PARTIAL")
+            pdf_status = "PARTIAL_MATCH"
         else:
             results.append("PDF_NONE")
+            pdf_status = "NO_MATCH"
     else:
         results.append("PDF_MISSING")
+        pdf_status = "N/A"
 
     if t_rb:
         s = similar(t_txt, t_rb)
         if s >= EXACT_THR:
             results.append("RB_EXACT")
+            rb_status = "EXACT_MATCH"
         elif s >= PARTIAL_THR:
             results.append("RB_PARTIAL")
+            rb_status = "PARTIAL_MATCH"
         else:
             results.append("RB_NONE")
+            rb_status = "NO_MATCH"
     else:
         results.append("RB_MISSING")
+        rb_status = "N/A"
 
     if all(r.endswith("EXACT") for r in results if not r.endswith("MISSING")):
         status = "EXACT_MATCH"
@@ -426,7 +478,7 @@ def compare_text(index, group, field, txt, pdf, rb, notes=""):
     else:
         status = "NO_MATCH"
 
-    return ComparisonResult(index, group, field, t_txt, t_pdf, t_rb, status, notes)
+    return ComparisonResult(index, group, field, t_txt, t_pdf, t_rb, status, notes, pdf_status=pdf_status, rb_status=rb_status)
 
 def compare_time(index, group, field, txt, pdf, rb, notes=""):
     T_txt = parse_time_val(txt)
@@ -435,21 +487,29 @@ def compare_time(index, group, field, txt, pdf, rb, notes=""):
 
     if not T_txt:
         status = "MISSING"
-        return ComparisonResult(index, group, field, txt, pdf, rb, status, notes)
+        return ComparisonResult(index, group, field, txt, pdf, rb, status, notes, pdf_status="N/A", rb_status="N/A")
 
     results = []
+    pdf_status = "N/A"
+    rb_status = "N/A"
 
     if T_pdf:
         d = time_diff_minutes(T_txt, T_pdf)
-        results.append("PDF_OK" if d is not None and d <= 5 else "PDF_NONE")
+        ok = d is not None and d <= 5
+        results.append("PDF_OK" if ok else "PDF_NONE")
+        pdf_status = "EXACT_MATCH" if ok else "NO_MATCH"
     else:
         results.append("PDF_MISSING")
+        pdf_status = "N/A"
 
     if T_rb:
         d = time_diff_minutes(T_txt, T_rb)
-        results.append("RB_EXACT" if d is not None and d <= 0.01 else "RB_NONE")
+        ok = d is not None and d <= 0.01
+        results.append("RB_EXACT" if ok else "RB_NONE")
+        rb_status = "EXACT_MATCH" if ok else "NO_MATCH"
     else:
         results.append("RB_MISSING")
+        rb_status = "N/A"
 
     if all(r in ("PDF_OK", "RB_EXACT") for r in results if not r.endswith("MISSING")):
         status = "EXACT_MATCH"
@@ -458,7 +518,7 @@ def compare_time(index, group, field, txt, pdf, rb, notes=""):
     else:
         status = "NO_MATCH"
 
-    return ComparisonResult(index, group, field, txt, pdf, rb, status, notes)
+    return ComparisonResult(index, group, field, txt, pdf, rb, status, notes, pdf_status=pdf_status, rb_status=rb_status)
 
 def strict_page_match(actual_page, expected_page):
     return actual_page == expected_page
@@ -490,40 +550,40 @@ def run_all_comparisons(txt_data, pdf_data, rb_data):
     # 10-12 Appearances
     heading = "Yes" if txt_data.appearances.get("heading_present") else "No"
     s = "EXACT_MATCH" if txt_data.appearances.get("heading_present") else "NO_MATCH"
-    results.append(ComparisonResult(10,"Appearances","Appearances Heading Present", heading,"","",s))
+    results.append(ComparisonResult(10,"Appearances","Appearances Heading Present", heading,"","",s, pdf_status="N/A", rb_status="N/A"))
 
     sides = txt_data.appearances.get("sides", [])
     cap = normalize_case(txt_data.title.get("case_style",""))
     ok = any(normalize_case(x) in cap for x in sides)
     s = "EXACT_MATCH" if ok else "NO_MATCH"
-    results.append(ComparisonResult(11,"Appearances","On Behalf of Side Matches Title Page", ", ".join(sides),"","",s))
+    results.append(ComparisonResult(11,"Appearances","On Behalf of Side Matches Title Page", ", ".join(sides),"","",s, pdf_status="N/A", rb_status="N/A"))
 
     atty = txt_data.appearances.get("attorneys", [])
     s = "EXACT_MATCH" if atty else "NO_MATCH"
-    results.append(ComparisonResult(12,"Appearances","Attorney Names / Contact Info Present", ", ".join(atty),"","",s))
+    results.append(ComparisonResult(12,"Appearances","Attorney Names / Contact Info Present", ", ".join(atty),"","",s, pdf_status="N/A", rb_status="N/A"))
 
     # 13-18 Indices
     results.append(c(13,"Indices","Witness Name (Index Page Verification)", txt_data.title.get("witness_name"),"", rb_data.fields.get("Witness","")))
 
     blk = txt_data.indices.get("exam_index_block","")
     s = "EXACT_MATCH" if blk else "NO_MATCH"
-    results.append(ComparisonResult(14,"Indices","Index to Examinations Present", "Yes" if blk else "No","","",s))
+    results.append(ComparisonResult(14,"Indices","Index to Examinations Present", "Yes" if blk else "No","","",s, pdf_status="N/A", rb_status="N/A"))
 
     ex_pages = txt_data.indices.get("exam_pages", [])
     s = "EXACT_MATCH" if ex_pages else "NO_MATCH"
-    results.append(ComparisonResult(15,"Indices","Index to Examinations Page Numbers Correct", str(ex_pages),"","",s))
+    results.append(ComparisonResult(15,"Indices","Index to Examinations Page Numbers Correct", str(ex_pages),"","",s, pdf_status="N/A", rb_status="N/A"))
 
     blk = txt_data.indices.get("exhibit_index_block","")
     s = "EXACT_MATCH" if blk else "NO_MATCH"
-    results.append(ComparisonResult(16,"Indices","Index to Exhibits Present", "Yes" if blk else "No","","",s))
+    results.append(ComparisonResult(16,"Indices","Index to Exhibits Present", "Yes" if blk else "No","","",s, pdf_status="N/A", rb_status="N/A"))
 
     ex_pages = txt_data.indices.get("exhibit_pages", [])
     s = "EXACT_MATCH" if ex_pages else "NO_MATCH"
-    results.append(ComparisonResult(17,"Indices","Index to Exhibits Page Numbers Correct", str(ex_pages),"","",s))
+    results.append(ComparisonResult(17,"Indices","Index to Exhibits Page Numbers Correct", str(ex_pages),"","",s, pdf_status="N/A", rb_status="N/A"))
 
     exloc = txt_data.exhibits.get("locations", {})
     s = "EXACT_MATCH" if exloc else "NO_MATCH"
-    results.append(ComparisonResult(18,"Indices","Exhibit Parentheticals Present", str(exloc),"","",s))
+    results.append(ComparisonResult(18,"Indices","Exhibit Parentheticals Present", str(exloc),"","",s, pdf_status="N/A", rb_status="N/A"))
 
     # 19-22 Ending
     results.append(c(19,"Ending","Job Title Heading (Ending Section)", txt_data.title.get("job_title"),"", rb_data.fields.get("TaskType","")))
@@ -532,12 +592,12 @@ def run_all_comparisons(txt_data, pdf_data, rb_data):
 
     sig = txt_data.ending.get("signature")
     s = "EXACT_MATCH" if sig else "NO_MATCH"
-    results.append(ComparisonResult(22,"Ending","Signature Parenthetical", sig or "","","",s))
+    results.append(ComparisonResult(22,"Ending","Signature Parenthetical", sig or "","","",s, pdf_status="N/A", rb_status="N/A"))
 
     # 23-25 Disclosure
     blk = txt_data.disclosure.get("block","")
     s = "EXACT_MATCH" if blk else "NO_MATCH"
-    results.append(ComparisonResult(23,"Disclosure","Disclosure Page Present", "Yes" if blk else "No","","",s))
+    results.append(ComparisonResult(23,"Disclosure","Disclosure Page Present", "Yes" if blk else "No","","",s, pdf_status="N/A", rb_status="N/A"))
 
     results.append(c(24,"Disclosure","Disclosure Date", txt_data.disclosure.get("date"),"", rb_data.fields.get("JobDate","")))
     results.append(c(25,"Disclosure","Disclosure Resource", txt_data.disclosure.get("resource"),"", rb_data.fields.get("Resource","")))
@@ -545,11 +605,11 @@ def run_all_comparisons(txt_data, pdf_data, rb_data):
     # 26-29 Certificate
     blk = txt_data.certificate.get("block","")
     s = "EXACT_MATCH" if blk else "NO_MATCH"
-    results.append(ComparisonResult(26,"Certificate","Certificate Heading Present", "Yes" if blk else "No","","",s))
+    results.append(ComparisonResult(26,"Certificate","Certificate Heading Present", "Yes" if blk else "No","","",s, pdf_status="N/A", rb_status="N/A"))
 
     crt = txt_data.certificate.get("court","")
     s = "EXACT_MATCH" if crt else "NO_MATCH"
-    results.append(ComparisonResult(27,"Certificate","Certificate Court Subheading Present", crt or "","","",s))
+    results.append(ComparisonResult(27,"Certificate","Certificate Court Subheading Present", crt or "","","",s, pdf_status="N/A", rb_status="N/A"))
 
     results.append(c(28,"Certificate","Certificate Date", txt_data.certificate.get("date"),"", rb_data.fields.get("JobDate","")))
 
@@ -594,7 +654,7 @@ def organize_results(results):
 # Module 5A: PDF Report Setup
 # ============================
 
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib import colors
@@ -605,9 +665,31 @@ def _shorten(s, limit=120):
     s = str(s).strip()
     return s if len(s) <= limit else s[:limit] + "..."
 
+
+def _status_icon(status):
+    mapping = {
+        "EXACT_MATCH": "Exact Match",
+        "PARTIAL_MATCH": "Partial Match",
+        "NO_MATCH": "No Match",
+        "MISSING": "Missing",
+        "N/A": "N/A",
+        "": "N/A",
+    }
+    return mapping.get(status, status or "N/A")
+
+
+def _status_color(status):
+    return {
+        "EXACT_MATCH": colors.lightgreen,
+        "PARTIAL_MATCH": colors.lightyellow,
+        "NO_MATCH": colors.salmon,
+        "MISSING": colors.whitesmoke,
+    }.get(status, colors.whitesmoke)
+
 class PDFReportBuilder:
-    def __init__(self, path):
+    def __init__(self, path, job_number="UNKNOWN", **_ignore):
         self.path = path
+        self.job_number = job_number
         self.styles = getSampleStyleSheet()
         self.title_style = self.styles["Title"]
         self.header_style = self.styles["Heading2"]
@@ -619,86 +701,116 @@ class PDFReportBuilder:
             textColor=colors.red
         )
 
-    def build(self, summary_groups, all_results):
+    def build(self, summary_groups, all_results, extraction_data=None):
         story = []
-        self._add_summary_page(story, summary_groups)
-        story.append(PageBreak())
-        self._add_detail_pages(story, all_results)
+        self._add_summary_page(story, summary_groups, all_results)
+        if extraction_data:
+            self._add_detail_pages(story, extraction_data)
         doc = SimpleDocTemplate(self.path, pagesize=LETTER,
-                                rightMargin=40, leftMargin=40,
-                                topMargin=40, bottomMargin=40)
+                                rightMargin=30, leftMargin=30,
+                                topMargin=30, bottomMargin=30)
         doc.build(story)
         return self.path
 
-    def _add_summary_page(self, story, groups):
-        pass  # Implemented in Module 5B
-
-    def _add_detail_pages(self, story, all_results):
-        pass  # Implemented in Module 5C
-
-# ============================
-# Module 5B: Summary Page Builder
-# ============================
-
-def _section_header(builder, story, title):
-    story.append(Paragraph(title, builder.header_style))
-    story.append(Spacer(1, 6))
-
-def _summary_line(builder, story, result):
-    txt = f"{result.index}. {result.group} – {result.field}"
-    story.append(Paragraph(txt, builder.normal))
-    story.append(Spacer(1, 3))
-
-def PDFReportBuilder__add_summary_page(self, story, groups):
-    story.append(Paragraph("QC Summary", self.title_style))
-    story.append(Spacer(1, 12))
-
-    order_titles = [
-        ("EXACT", "Exact Matches"),
-        ("PARTIAL", "Partial Matches"),
-        ("NO", "No Matches"),
-        ("MISSING", "Missing Items")
-    ]
-
-    for key, label in order_titles:
-        _section_header(self, story, label)
-        section = groups.get(key, [])
-        if not section:
-            story.append(Paragraph("None.", self.normal))
-            story.append(Spacer(1, 6))
-            continue
-        for r in section:
-            _summary_line(self, story, r)
-        story.append(Spacer(1, 10))
-
-PDFReportBuilder._add_summary_page = PDFReportBuilder__add_summary_page
-
-# ============================
-# Module 5C: Detail Pages Builder
-# ============================
-
-def PDFReportBuilder__add_detail_pages(self, story, all_results):
-    for r in sorted(all_results, key=lambda x: x.index):
-        header = f"{r.index}. {r.group} – {r.field}: {r.status}"
-        story.append(Paragraph(header, self.header_style))
-
-        val_txt = _shorten(r.txt)
-        val_pdf = _shorten(r.pdf)
-        val_rb  = _shorten(r.rb)
-
-        parts = []
-        if val_txt: parts.append(f"TXT: {val_txt}")
-        if val_pdf: parts.append(f"PDF: {val_pdf}")
-        if val_rb:  parts.append(f"RB: {val_rb}")
-
-        body = " | ".join(parts)
-        if r.notes:
-            body += f"  Notes: {r.notes}"
-
-        story.append(Paragraph(body, self.value_style))
+    def _add_summary_page(self, story, groups, all_results):
+        story.append(Paragraph("Gallo QC Report", self.title_style))
+        story.append(Paragraph(f"Job {self.job_number}", self.header_style))
         story.append(Spacer(1, 12))
 
-PDFReportBuilder._add_detail_pages = PDFReportBuilder__add_detail_pages
+        story.append(Paragraph("Overall Status", self.header_style))
+        story.append(Spacer(1, 6))
+
+        exact_ct = len(groups.get("EXACT", []))
+        partial_ct = len(groups.get("PARTIAL", []))
+        no_ct = len(groups.get("NO", []))
+        missing_ct = len(groups.get("MISSING", []))
+        total_ct = exact_ct + partial_ct + no_ct + missing_ct
+        review_flag = "REVIEW REQUIRED" if (partial_ct or no_ct or missing_ct) else "OK"
+
+        summary_data = [
+            ["Status", "Exact", "Partial", "No Match", "Missing", "Total", "REVIEW REQUIRED"],
+            ["", str(exact_ct), str(partial_ct), str(no_ct), str(missing_ct), str(total_ct), review_flag]
+        ]
+        summary_table = Table(summary_data, colWidths=[70, 55, 55, 70, 60, 55, 110])
+        summary_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("TEXTCOLOR", (-1, 1), (-1, 1), colors.red if review_flag != "OK" else colors.green),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTNAME", (0, 1), (-1, 1), "Helvetica"),
+            ("FONTSIZE", (0, 0), (-1, -1), 11),
+        ]))
+        story.append(summary_table)
+        story.append(Spacer(1, 14))
+
+        story.append(Paragraph("Element Details", self.header_style))
+        story.append(Spacer(1, 8))
+
+        group_order = ["Title Page", "Appearances", "Indices", "Ending", "Disclosure", "Certificate"]
+        for g in group_order:
+            group_rows = [r for r in sorted(all_results, key=lambda x: x.index) if r.group == g]
+            if not group_rows:
+                continue
+            story.append(Paragraph(g, self.header_style))
+            detail_data = [["Element", "RB", "Notice"]]
+            table_styles = [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                ("ALIGN", (1, 1), (-1, -1), "CENTER"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, 0), 11),
+                ("FONTSIZE", (0, 1), (-1, -1), 10),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ]
+
+            for row_idx, r in enumerate(group_rows, start=1):
+                rb_status = r.rb_status or r.status
+                pdf_status = r.pdf_status or r.status
+                detail_data.append([
+                    r.field,
+                    _status_icon(rb_status),
+                    _status_icon(pdf_status)
+                ])
+                table_styles.extend([
+                    ("BACKGROUND", (1, row_idx), (1, row_idx), _status_color(rb_status)),
+                    ("BACKGROUND", (2, row_idx), (2, row_idx), _status_color(pdf_status)),
+                ])
+
+            table = Table(detail_data, colWidths=[230, 140, 140])
+            table.setStyle(TableStyle(table_styles))
+            story.append(table)
+            story.append(Spacer(1, 12))
+
+    def _add_detail_pages(self, story, extraction_data):
+        for idx, (source, sections) in enumerate(extraction_data):
+            story.append(PageBreak())
+            story.append(Paragraph(f"{source} Extraction", self.header_style))
+            story.append(Spacer(1, 8))
+
+            for section_name, values in sections:
+                if not values:
+                    continue
+                story.append(Paragraph(section_name, self.styles.get("Heading3")))
+                table_data = [["Field", "Value"]]
+                table_styles = [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, 0), 11),
+                    ("FONTSIZE", (0, 1), (-1, -1), 10),
+                ]
+
+                for k, v in values.items():
+                    table_data.append([k, _shorten(v, 500)])
+
+                table = Table(table_data, colWidths=[200, 330])
+                table.setStyle(TableStyle(table_styles))
+                story.append(table)
+                story.append(Spacer(1, 12))
 
 # ============================
 # Module 5D: Report Orchestrator
@@ -706,6 +818,48 @@ PDFReportBuilder._add_detail_pages = PDFReportBuilder__add_detail_pages
 
 import os
 
-def generate_qc_pdf_report(output_path, results_grouped, all_results):
-    builder = PDFReportBuilder(output_path)
-    return builder.build(results_grouped, all_results)
+def _prepare_extraction_sections(txt_data=None, pdf_data=None, rb_data=None):
+    def to_str_map(obj):
+        if obj is None:
+            return {}
+        if isinstance(obj, dict):
+            items = obj.items()
+        else:
+            items = getattr(obj, "items", lambda: getattr(obj, "__dict__", {}).items())()
+        return {k: _shorten(v if isinstance(v, str) else str(v), 800) for k, v in items if v not in (None, "", [])}
+
+    extractions = []
+
+    if txt_data is not None:
+        txt_sections = [
+            ("Title Page", to_str_map(getattr(txt_data, "title", {}))),
+            ("Appearances", to_str_map(getattr(txt_data, "appearances", {}))),
+            ("Indices", to_str_map(getattr(txt_data, "indices", {}))),
+            ("Exhibits", to_str_map(getattr(txt_data, "exhibits", {}))),
+            ("Ending", to_str_map(getattr(txt_data, "ending", {}))),
+            ("Disclosure", to_str_map(getattr(txt_data, "disclosure", {}))),
+            ("Certificate", to_str_map(getattr(txt_data, "certificate", {}))),
+        ]
+        extractions.append(("TXT", txt_sections))
+
+    if pdf_data is not None:
+        extractions.append(("PDF", [("Notice", to_str_map(pdf_data))]))
+
+    if rb_data is not None:
+        rb_fields = getattr(rb_data, "fields", rb_data)
+        extractions.append(("RB", [("RB Fields", to_str_map(rb_fields))]))
+
+    return extractions
+
+
+def generate_qc_pdf_report(output_path, results_grouped, all_results, job_number="UNKNOWN", txt_data=None, pdf_data=None, rb_data=None):
+    try:
+        builder = PDFReportBuilder(output_path, job_number=job_number)
+    except TypeError:
+        # Backward compatibility if an older PDFReportBuilder signature is in use
+        builder = PDFReportBuilder(output_path)
+        if getattr(builder, "job_number", None) is None:
+            builder.job_number = job_number
+
+    extraction_data = _prepare_extraction_sections(txt_data, pdf_data, rb_data)
+    return builder.build(results_grouped, all_results, extraction_data=extraction_data)
