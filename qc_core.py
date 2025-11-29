@@ -120,6 +120,42 @@ class TXTParser:
         m = re.search(r"Reported by\s+(.+)", joined, re.IGNORECASE)
         data.title["resource"] = m.group(1).strip() if m else ""
 
+    def _extract_case_number(self, lines, joined):
+        """Locate a case number near "CIVIL ACTION" / "FILE NO" markers on the title page."""
+
+        # Flexible case number patterns (allow letters, separators, and mixed formatting)
+        case_patterns = [
+            re.compile(r"\b\d{2,4}\s*[-\/]?\s*[A-Z]{1,4}\s*[-\/]?\s*\d{3,6}\b", re.IGNORECASE),
+            re.compile(r"\b[A-Z]{1,4}\s*[-\/]?\s*\d{2,4}\s*[-\/]?\s*[A-Z]{0,2}\s*[-\/]?\s*\d{3,6}\b", re.IGNORECASE),
+        ]
+
+        def normalize(num: str) -> str:
+            return re.sub(r"[\s\-\/\.]+", "", num)
+
+        def match_case(text: str):
+            for pat in case_patterns:
+                m = pat.search(text)
+                if m:
+                    return normalize(m.group(0))
+            return ""
+
+        # Prefer case numbers that appear on or immediately after labeled lines
+        for idx, line in enumerate(lines):
+            if re.search(r"CIVIL ACTION|FILE NO", line, re.IGNORECASE):
+                # Check the same line first
+                found = match_case(line)
+                if found:
+                    return found
+
+                # Check the next two lines for the number (common split layout)
+                for look_ahead in lines[idx + 1 : idx + 3]:
+                    found = match_case(look_ahead)
+                    if found:
+                        return found
+
+        # Fallback: search the whole joined block while ignoring dates (requires two digit groups)
+        return match_case(joined)
+
     def _find_case_style(self, txt):
         # Grab block around Plaintiff/Defendant
         m = re.search(r"(.+Plaintiff.+vs\.?.+Defendant)", txt, re.IGNORECASE)
