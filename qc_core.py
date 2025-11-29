@@ -30,6 +30,11 @@ def extract_court_heading_from_lines(lines):
         if not line:
             continue
         if looks_like_heading(line.strip()):
+    """Capture the court heading block (e.g., two uppercase lines) from sequential lines."""
+    for idx, line in enumerate(lines):
+        if not line:
+            continue
+        if re.search(r"IN THE .*COURT", line, re.IGNORECASE):
             heading = [line.strip()]
             for follow in lines[idx + 1 :]:
                 stripped = follow.strip()
@@ -40,11 +45,13 @@ def extract_court_heading_from_lines(lines):
                 alpha = sum(ch.isalpha() for ch in stripped)
                 lower = sum(ch.islower() for ch in stripped)
                 if alpha and (lower / alpha) > 0.25:
+                if not re.fullmatch(r"[A-Z0-9 .,'/&()\-]+", stripped) and not stripped.isupper():
                     break
                 heading.append(stripped)
             return " ".join(heading)
     return ""
 
+    
 class TXTData:
     def __init__(self):
         self.pages = {}               # page_number -> list of lines
@@ -275,10 +282,14 @@ class PDFParser:
 
         primary_text = first_page_text or text
         raw_lines = [ln.rstrip() for ln in primary_text.splitlines()]
+        raw_lines = [ln.rstrip() for ln in text.splitlines()]
         # Normalize
         normalized = re.sub(r'\s+', ' ', primary_text)
 
-        data["court_heading"] = self._extract_court_heading(primary_text, raw_lines)
+        data["court_heading"] = extract_court_heading_from_lines(raw_lines) or self._find_heading_block(primary_text)
+        data["court_heading"] = extract_court_heading_from_lines(raw_lines) or self._find(
+            normalized, r"IN THE .*?COURT.*"
+        )
         data["case_number"]   = self._find(normalized, r"(CIVIL ACTION FILE NO\.?|FILE NO\.?)\s*[#:]*\s*([A-Za-z0-9\-\/\.]+)", group=2)
         data["case_style"]    = self._find(normalized, r".+?,\s*Plaintiff.*?v\.?.+?,\s*Defendant", flags=re.IGNORECASE)
         data["witness_name"]  = self._find(normalized, r"Deposition of\s+(.+?)(?=[,\.])", group=1)
@@ -294,17 +305,14 @@ class PDFParser:
             return ""
         return m.group(group).strip()
 
-    def _extract_court_heading(self, page_text, raw_lines):
-        """Run court heading detection once to avoid duplicated heuristics."""
-
-        heading = extract_court_heading_from_lines(raw_lines)
-        if heading:
-            return heading
-        return self._find_heading_block(page_text)
-
     def _find_heading_block(self, text):
         """Fallback to grab a heading block from the first page text while stopping at party metadata."""
         snippet = text[:1200]
+        lines = [ln.strip() for ln in snippet.splitlines() if ln.strip()]
+        heading = extract_court_heading_from_lines(lines)
+        if heading:
+            return heading
+
         # If no explicit heading line found, try a regex anchored near COURT and stop at party labels
         m = re.search(r"(IN\s+THE|THE)\s+[^\n]*COURT[^\n]*", snippet, re.IGNORECASE)
         if not m:
