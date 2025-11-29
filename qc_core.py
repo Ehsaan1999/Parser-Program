@@ -706,6 +706,76 @@ PDFReportBuilder._add_detail_pages = PDFReportBuilder__add_detail_pages
 
 import os
 
+class QCSummary:
+    """Lightweight container returned by :func:`run_qc`."""
+
+    def __init__(self, job_number, witness_name, counts):
+        self.job_number = job_number or ""
+        self.witness_name = witness_name or ""
+        self.counts = counts or {}
+
 def generate_qc_pdf_report(output_path, results_grouped, all_results):
     builder = PDFReportBuilder(output_path)
     return builder.build(results_grouped, all_results)
+
+# ============================
+# Module 6: Orchestrator (run_qc)
+# ============================
+
+import glob
+
+
+def _find_first(path_pattern):
+    matches = glob.glob(path_pattern)
+    return matches[0] if matches else ""
+
+
+def _derive_job_number(job_folder, txt_path):
+    # Prefer folder name digits, fall back to TXT filename digits.
+    for candidate in (job_folder, os.path.basename(txt_path)):
+        m = re.search(r"(\d+)", os.path.basename(candidate))
+        if m:
+            return m.group(1)
+    return ""
+
+
+def run_qc(job_folder):
+    """Run the full QC pipeline for the given job folder.
+
+    Returns a tuple of (QCSummary, report_path).
+    """
+
+    if not os.path.isdir(job_folder):
+        raise FileNotFoundError(f"Job folder not found: {job_folder}")
+
+    txt_path = _find_first(os.path.join(job_folder, "*.txt"))
+    if not txt_path:
+        raise FileNotFoundError("No TXT transcript found in job folder")
+
+    pdf_path = _find_first(os.path.join(job_folder, "*.pdf"))
+
+    txt_parser = TXTParser()
+    txt_data = txt_parser.load(txt_path)
+
+    pdf_parser = PDFParser()
+    pdf_data = pdf_parser.load(pdf_path) if pdf_path else {}
+
+    job_number = _derive_job_number(job_folder, txt_path)
+    rb_loader = RBLoader()
+    rb_data = rb_loader.get_job_data(job_number) if job_number else RBJobData("")
+
+    all_results = run_all_comparisons(txt_data, pdf_data, rb_data)
+    grouped = organize_results(all_results)
+
+    counts = {
+        "EXACT_MATCH": sum(1 for r in all_results if r.status == "EXACT_MATCH"),
+        "PARTIAL_MATCH": sum(1 for r in all_results if r.status == "PARTIAL_MATCH"),
+        "NO_MATCH": sum(1 for r in all_results if r.status == "NO_MATCH"),
+        "MISSING": sum(1 for r in all_results if r.status not in {"EXACT_MATCH", "PARTIAL_MATCH", "NO_MATCH"}),
+    }
+
+    report_path = os.path.join(job_folder, "QC_Report.pdf")
+    generate_qc_pdf_report(report_path, grouped, all_results)
+
+    summary = QCSummary(job_number, txt_data.title.get("witness_name"), counts)
+    return summary, report_path
