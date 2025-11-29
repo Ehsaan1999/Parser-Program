@@ -8,6 +8,7 @@ Module 1: TXT Parsing Engine
 import re
 from dateutil import parser as dateparser
 
+
 COURT_HEADING_STOP_PATTERN = re.compile(
     r"(PLAINTIFF|DEFENDANT|VS\.?.|CIVIL ACTION|CASE NO\.?|FILE NO\.?|APPELLANT|RESPONDENT)",
     re.IGNORECASE,
@@ -15,6 +16,21 @@ COURT_HEADING_STOP_PATTERN = re.compile(
 
 
 def extract_court_heading_from_lines(lines):
+    """Capture a court heading block (one or more uppercase lines) from sequential lines."""
+
+    def looks_like_heading(line):
+        if not line:
+            return False
+        has_court = "COURT" in line.upper()
+        alpha = sum(ch.isalpha() for ch in line)
+        lower = sum(ch.islower() for ch in line)
+        upperish = alpha and (lower / alpha) <= 0.25
+        return has_court and upperish
+
+    for idx, line in enumerate(lines):
+        if not line:
+            continue
+        if looks_like_heading(line.strip()):
     """Capture the court heading block (e.g., two uppercase lines) from sequential lines."""
     for idx, line in enumerate(lines):
         if not line:
@@ -27,11 +43,15 @@ def extract_court_heading_from_lines(lines):
                     break
                 if COURT_HEADING_STOP_PATTERN.search(stripped):
                     break
+                alpha = sum(ch.isalpha() for ch in stripped)
+                lower = sum(ch.islower() for ch in stripped)
+                if alpha and (lower / alpha) > 0.25:
                 if not re.fullmatch(r"[A-Z0-9 .,'/&()\-]+", stripped) and not stripped.isupper():
                     break
                 heading.append(stripped)
             return " ".join(heading)
     return ""
+
     
 class TXTData:
     def __init__(self):
@@ -250,16 +270,24 @@ class PDFParser:
     def load(self, path):
         data = {}
         text = ""
+        first_page_text = ""
         try:
             reader = PdfReader(path)
-            for page in reader.pages:
-                text += page.extract_text() or ""
+            for idx, page in enumerate(reader.pages):
+                page_text = page.extract_text() or ""
+                if idx == 0:
+                    first_page_text = page_text
+                text += page_text
         except:
             return data
+
+        primary_text = first_page_text or text
+        raw_lines = [ln.rstrip() for ln in primary_text.splitlines()]
         raw_lines = [ln.rstrip() for ln in text.splitlines()]
         # Normalize
-        normalized = re.sub(r'\s+', ' ', text)
+        normalized = re.sub(r'\s+', ' ', primary_text)
 
+        data["court_heading"] = extract_court_heading_from_lines(raw_lines) or self._find_heading_block(primary_text)
         data["court_heading"] = extract_court_heading_from_lines(raw_lines) or self._find(
             normalized, r"IN THE .*?COURT.*"
         )
@@ -277,6 +305,31 @@ class PDFParser:
         if not m:
             return ""
         return m.group(group).strip()
+
+    def _find_heading_block(self, text):
+        """Fallback to grab a heading block from the first page text while stopping at party metadata."""
+        snippet = text[:1200]
+        lines = [ln.strip() for ln in snippet.splitlines() if ln.strip()]
+        heading = extract_court_heading_from_lines(lines)
+        if heading:
+            return heading
+
+        # If no explicit heading line found, try a regex anchored near COURT and stop at party labels
+        m = re.search(r"(IN\s+THE|THE)\s+[^\n]*COURT[^\n]*", snippet, re.IGNORECASE)
+        if not m:
+            return ""
+        start = m.start()
+        tail_lines = [ln.strip() for ln in snippet[start:].splitlines() if ln.strip()]
+        collected = []
+        for ln in tail_lines:
+            if COURT_HEADING_STOP_PATTERN.search(ln):
+                break
+            alpha = sum(ch.isalpha() for ch in ln)
+            lower = sum(ch.islower() for ch in ln)
+            if alpha and (lower / alpha) > 0.25 and collected:
+                break
+            collected.append(ln)
+        return " ".join(collected)
 
 
 
@@ -733,6 +786,7 @@ PDFReportBuilder._add_detail_pages = PDFReportBuilder__add_detail_pages
 
 import os
 
+
 class QCSummary:
     """Lightweight container returned by :func:`run_qc`."""
 
@@ -744,6 +798,7 @@ class QCSummary:
 def generate_qc_pdf_report(output_path, results_grouped, all_results):
     builder = PDFReportBuilder(output_path)
     return builder.build(results_grouped, all_results)
+
 
 # ============================
 # Module 6: Orchestrator (run_qc)
