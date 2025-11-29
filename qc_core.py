@@ -15,21 +15,6 @@ COURT_HEADING_STOP_PATTERN = re.compile(
 
 
 def extract_court_heading_from_lines(lines):
-    """Capture a court heading block (one or more uppercase lines) from sequential lines."""
-
-    def looks_like_heading(line):
-        if not line:
-            return False
-        has_court = "COURT" in line.upper()
-        alpha = sum(ch.isalpha() for ch in line)
-        lower = sum(ch.islower() for ch in line)
-        upperish = alpha and (lower / alpha) <= 0.25
-        return has_court and upperish
-
-    for idx, line in enumerate(lines):
-        if not line:
-            continue
-        if looks_like_heading(line.strip()):
     """Capture the court heading block (e.g., two uppercase lines) from sequential lines."""
     for idx, line in enumerate(lines):
         if not line:
@@ -45,6 +30,7 @@ def extract_court_heading_from_lines(lines):
                 alpha = sum(ch.isalpha() for ch in stripped)
                 lower = sum(ch.islower() for ch in stripped)
                 if alpha and (lower / alpha) > 0.25:
+                    break
                 if not re.fullmatch(r"[A-Z0-9 .,'/&()\-]+", stripped) and not stripped.isupper():
                     break
                 heading.append(stripped)
