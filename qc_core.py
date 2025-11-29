@@ -1,4 +1,3 @@
-
 """
 Module 1: TXT Parsing Engine
 - Page-break detection
