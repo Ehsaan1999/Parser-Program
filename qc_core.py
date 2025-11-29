@@ -14,25 +14,12 @@ COURT_HEADING_STOP_PATTERN = re.compile(
 )
 
 
-def _looks_like_court_heading_line(line: str) -> bool:
-    """Return True when a line resembles an uppercase court heading."""
-
-    if not line:
-        return False
-    has_court = "COURT" in line.upper()
-    alpha = sum(ch.isalpha() for ch in line)
-    lower = sum(ch.islower() for ch in line)
-    upperish = alpha and (lower / alpha) <= 0.25
-    return has_court and upperish
-
-
 def extract_court_heading_from_lines(lines):
-    """Capture a court heading block (one or more uppercase lines) from sequential lines."""
-
+    """Capture the court heading block (e.g., two uppercase lines) from sequential lines."""
     for idx, line in enumerate(lines):
         if not line:
             continue
-        if _looks_like_court_heading_line(line.strip()):
+        if re.search(r"IN THE .*COURT", line, re.IGNORECASE):
             heading = [line.strip()]
             for follow in lines[idx + 1 :]:
                 stripped = follow.strip()
@@ -44,10 +31,13 @@ def extract_court_heading_from_lines(lines):
                 lower = sum(ch.islower() for ch in stripped)
                 if alpha and (lower / alpha) > 0.25:
                     break
+                if not re.fullmatch(r"[A-Z0-9 .,'/&()\-]+", stripped) and not stripped.isupper():
+                    break
                 heading.append(stripped)
             return " ".join(heading)
     return ""
 
+    
 class TXTData:
     def __init__(self):
         self.pages = {}               # page_number -> list of lines
@@ -106,7 +96,7 @@ class TXTParser:
 
         # Basic patterns
         data.title["court_heading"] = extract_court_heading_from_lines(p1)
-        data.title["case_number"] = self._extract_case_number(p1, joined)
+        data.title["case_number"] = find(r"(202\d.*|20\d{2}.*|CIVIL ACTION.*|FILE NO.*)")
         data.title["case_style"] = self._find_case_style(joined)
 
         # Witness name detection
@@ -133,42 +123,38 @@ class TXTParser:
     def _extract_case_number(self, lines, joined):
         """Locate a case number near "CIVIL ACTION" / "FILE NO" markers on the title page."""
 
-        label_re = re.compile(r"CIVIL ACTION|FILE NO", re.IGNORECASE)
-        token_re = re.compile(r"([A-Za-z0-9][A-Za-z0-9:\-\/.]{4,})")
+        # Flexible case number patterns (allow letters, separators, and mixed formatting)
+        case_patterns = [
+            re.compile(r"\b\d{2,4}\s*[-\/]?\s*[A-Z]{1,4}\s*[-\/]?\s*\d{3,6}\b", re.IGNORECASE),
+            re.compile(r"\b[A-Z]{1,4}\s*[-\/]?\s*\d{2,4}\s*[-\/]?\s*[A-Z]{0,2}\s*[-\/]?\s*\d{3,6}\b", re.IGNORECASE),
+        ]
 
         def normalize(num: str) -> str:
-            return re.sub(r"[\s\-\./:]+", "", num)
+            return re.sub(r"[\s\-\/\.]+", "", num)
 
-        def token_candidates(text: str):
-            for match in token_re.finditer(text):
-                token = match.group(1).strip(" .#:;")
-                if sum(ch.isdigit() for ch in token) == 0:
-                    continue
-                # Skip bare labels without numeric content
-                label_only = re.sub(r"[^A-Za-z]", "", token).upper()
-                if label_only in {"CIVILACTION", "FILENO", "CIVILACTIONFILENO", "CIVILACTIONFILE"}:
-                    continue
-                yield token
+        def match_case(text: str):
+            for pat in case_patterns:
+                m = pat.search(text)
+                if m:
+                    return normalize(m.group(0))
+            return ""
 
-        def pick_best(tokens):
-            if not tokens:
-                return ""
-            tokens = sorted(tokens, key=lambda t: (-(len(t)), -sum(ch.isalpha() for ch in t)))
-            return normalize(tokens[0])
-
-        # Prefer case numbers near the CIVIL ACTION / FILE NO labels
+        # Prefer case numbers that appear on or immediately after labeled lines
         for idx, line in enumerate(lines):
-            if label_re.search(line):
-                window = lines[idx : idx + 5]
-                candidates = []
-                for win_line in window:
-                    candidates.extend(token_candidates(win_line))
-                best = pick_best(candidates)
-                if best:
-                    return best
+            if re.search(r"CIVIL ACTION|FILE NO", line, re.IGNORECASE):
+                # Check the same line first
+                found = match_case(line)
+                if found:
+                    return found
 
-        # Fallback: search the full joined text for a mixed letter/number token
-        return pick_best(list(token_candidates(joined)))
+                # Check the next two lines for the number (common split layout)
+                for look_ahead in lines[idx + 1 : idx + 3]:
+                    found = match_case(look_ahead)
+                    if found:
+                        return found
+
+        # Fallback: search the whole joined block while ignoring dates (requires two digit groups)
+        return match_case(joined)
 
     def _find_case_style(self, txt):
         # Grab block around Plaintiff/Defendant
@@ -318,10 +304,14 @@ class PDFParser:
 
         primary_text = first_page_text or text
         raw_lines = [ln.rstrip() for ln in primary_text.splitlines()]
+        raw_lines = [ln.rstrip() for ln in text.splitlines()]
         # Normalize
         normalized = re.sub(r'\s+', ' ', primary_text)
 
-        data["court_heading"] = self._extract_court_heading(primary_text, raw_lines)
+        data["court_heading"] = extract_court_heading_from_lines(raw_lines) or self._find_heading_block(primary_text)
+        data["court_heading"] = extract_court_heading_from_lines(raw_lines) or self._find(
+            normalized, r"IN THE .*?COURT.*"
+        )
         data["case_number"]   = self._find(normalized, r"(CIVIL ACTION FILE NO\.?|FILE NO\.?)\s*[#:]*\s*([A-Za-z0-9\-\/\.]+)", group=2)
         data["case_style"]    = self._find(normalized, r".+?,\s*Plaintiff.*?v\.?.+?,\s*Defendant", flags=re.IGNORECASE)
         data["witness_name"]  = self._find(normalized, r"Deposition of\s+(.+?)(?=[,\.])", group=1)
@@ -337,17 +327,14 @@ class PDFParser:
             return ""
         return m.group(group).strip()
 
-    def _extract_court_heading(self, page_text, raw_lines):
-        """Run court heading detection once to avoid duplicated heuristics."""
-
-        heading = extract_court_heading_from_lines(raw_lines)
-        if heading:
-            return heading
-        return self._find_heading_block(page_text)
-
     def _find_heading_block(self, text):
         """Fallback to grab a heading block from the first page text while stopping at party metadata."""
         snippet = text[:1200]
+        lines = [ln.strip() for ln in snippet.splitlines() if ln.strip()]
+        heading = extract_court_heading_from_lines(lines)
+        if heading:
+            return heading
+
         # If no explicit heading line found, try a regex anchored near COURT and stop at party labels
         m = re.search(r"(IN\s+THE|THE)\s+[^\n]*COURT[^\n]*", snippet, re.IGNORECASE)
         if not m:
