@@ -8,6 +8,31 @@ Module 1: TXT Parsing Engine
 import re
 from dateutil import parser as dateparser
 
+COURT_HEADING_STOP_PATTERN = re.compile(
+    r"(PLAINTIFF|DEFENDANT|VS\.?.|CIVIL ACTION|CASE NO\.?|FILE NO\.?|APPELLANT|RESPONDENT)",
+    re.IGNORECASE,
+)
+
+
+def extract_court_heading_from_lines(lines):
+    """Capture the court heading block (e.g., two uppercase lines) from sequential lines."""
+    for idx, line in enumerate(lines):
+        if not line:
+            continue
+        if re.search(r"IN THE .*COURT", line, re.IGNORECASE):
+            heading = [line.strip()]
+            for follow in lines[idx + 1 :]:
+                stripped = follow.strip()
+                if not stripped:
+                    break
+                if COURT_HEADING_STOP_PATTERN.search(stripped):
+                    break
+                if not re.fullmatch(r"[A-Z0-9 .,'/&()\-]+", stripped) and not stripped.isupper():
+                    break
+                heading.append(stripped)
+            return " ".join(heading)
+    return ""
+    
 class TXTData:
     def __init__(self):
         self.pages = {}               # page_number -> list of lines
@@ -65,7 +90,7 @@ class TXTParser:
             return m.group(0).strip() if m else ""
 
         # Basic patterns
-        data.title["court_heading"] = find(r"IN THE .*COURT.*")
+        data.title["court_heading"] = extract_court_heading_from_lines(p1)
         data.title["case_number"] = find(r"(202\d.*|20\d{2}.*|CIVIL ACTION.*|FILE NO.*)")
         data.title["case_style"] = self._find_case_style(joined)
 
@@ -231,11 +256,13 @@ class PDFParser:
                 text += page.extract_text() or ""
         except:
             return data
-
+        raw_lines = [ln.rstrip() for ln in text.splitlines()]
         # Normalize
         normalized = re.sub(r'\s+', ' ', text)
 
-        data["court_heading"] = self._find(normalized, r"IN THE .*?COURT.*")
+        data["court_heading"] = extract_court_heading_from_lines(raw_lines) or self._find(
+            normalized, r"IN THE .*?COURT.*"
+        )
         data["case_number"]   = self._find(normalized, r"(CIVIL ACTION FILE NO\.?|FILE NO\.?)\s*[#:]*\s*([A-Za-z0-9\-\/\.]+)", group=2)
         data["case_style"]    = self._find(normalized, r".+?,\s*Plaintiff.*?v\.?.+?,\s*Defendant", flags=re.IGNORECASE)
         data["witness_name"]  = self._find(normalized, r"Deposition of\s+(.+?)(?=[,\.])", group=1)
