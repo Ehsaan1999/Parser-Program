@@ -1,4 +1,3 @@
-
 """
 Module 1: TXT Parsing Engine
 - Page-break detection
@@ -7,6 +6,47 @@ Module 1: TXT Parsing Engine
 
 import re
 from dateutil import parser as dateparser
+
+
+COURT_HEADING_STOP_PATTERN = re.compile(
+    r"(PLAINTIFF|DEFENDANT|VS\.?.|CIVIL ACTION|CASE NO\.?|FILE NO\.?|APPELLANT|RESPONDENT)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_court_heading_line(line: str) -> bool:
+    """Return True when a line resembles an uppercase court heading."""
+
+    if not line:
+        return False
+    has_court = "COURT" in line.upper()
+    alpha = sum(ch.isalpha() for ch in line)
+    lower = sum(ch.islower() for ch in line)
+    upperish = alpha and (lower / alpha) <= 0.25
+    return has_court and upperish
+
+
+def extract_court_heading_from_lines(lines):
+    """Capture a court heading block (one or more uppercase lines) from sequential lines."""
+
+    for idx, line in enumerate(lines):
+        if not line:
+            continue
+        if _looks_like_court_heading_line(line.strip()):
+            heading = [line.strip()]
+            for follow in lines[idx + 1 :]:
+                stripped = follow.strip()
+                if not stripped:
+                    break
+                if COURT_HEADING_STOP_PATTERN.search(stripped):
+                    break
+                alpha = sum(ch.isalpha() for ch in stripped)
+                lower = sum(ch.islower() for ch in stripped)
+                if alpha and (lower / alpha) > 0.25:
+                    break
+                heading.append(stripped)
+            return " ".join(heading)
+    return ""
 
 class TXTData:
     def __init__(self):
@@ -65,8 +105,8 @@ class TXTParser:
             return m.group(0).strip() if m else ""
 
         # Basic patterns
-        data.title["court_heading"] = find(r"IN THE .*COURT.*")
-        data.title["case_number"] = find(r"(202\d.*|20\d{2}.*|CIVIL ACTION.*|FILE NO.*)")
+        data.title["court_heading"] = extract_court_heading_from_lines(p1)
+        data.title["case_number"] = self._extract_case_number(p1, joined)
         data.title["case_style"] = self._find_case_style(joined)
 
         # Witness name detection
@@ -89,6 +129,106 @@ class TXTParser:
         # Reporter
         m = re.search(r"Reported by\s+(.+)", joined, re.IGNORECASE)
         data.title["resource"] = m.group(1).strip() if m else ""
+
+    def _extract_case_number(self, lines, joined):
+        """Locate a case number near "CIVIL ACTION" / "FILE NO" markers on the title page."""
+
+        label_re = re.compile(r"CIVIL ACTION|FILE NO", re.IGNORECASE)
+        # Allow embedded spaces/colons/slashes while requiring at least one digit and 5+ total chars
+        token_re = re.compile(r"([A-Za-z0-9][A-Za-z0-9\s:\-\/.]{4,})")
+
+        def normalize(num: str) -> str:
+            return re.sub(r"[\s\-\./:]+", "", num)
+
+        def token_candidates(text: str):
+            for match in token_re.finditer(text):
+                token = match.group(1).strip(" .#:;")
+                if sum(ch.isdigit() for ch in token) == 0:
+                    continue
+                # Skip bare labels without numeric content
+                label_only = re.sub(r"[^A-Za-z]", "", token).upper()
+                if label_only in {"CIVILACTION", "FILENO", "CIVILACTIONFILENO", "CIVILACTIONFILE"}:
+                    continue
+                yield token
+
+        def column_aligned_case_number():
+            """Anchor on FILE NO. label and read the aligned value in following lines."""
+
+            for idx, line in enumerate(lines):
+                m = re.search(r"FILE NO\.?", line, re.IGNORECASE)
+                if not m:
+                    continue
+                label_col = m.start()
+                for win_line in lines[idx + 1 : idx + 7]:
+                    if not win_line.strip():
+                        continue
+                    for match in re.finditer(r"[A-Za-z0-9][A-Za-z0-9\s:\-\./]*[A-Za-z0-9]", win_line):
+                        token = match.group(0).strip(" .#:;")
+                        if sum(ch.isdigit() for ch in token) == 0:
+                            continue
+                        start_col = match.start()
+                        if abs(start_col - label_col) <= 2:
+                            return normalize(token)
+            return ""
+
+        def pick_best(tokens):
+            if not tokens:
+                return ""
+            tokens = sorted(tokens, key=lambda t: (-(len(t)), -sum(ch.isalpha() for ch in t)))
+            return normalize(tokens[0])
+
+        def aligned_candidates(start_idx: int, label_column: int):
+            """Prefer candidates that sit vertically beneath the label column to capture two-column layouts."""
+
+            scored = []
+            for offset, win_line in enumerate(lines[start_idx + 1 : start_idx + 6], 1):
+                for token in token_candidates(win_line):
+                    # Distance from the label column (smaller is better)
+                    pos = win_line.upper().find(token.upper())
+                    if pos < 0:
+                        pos = label_column
+                    distance = abs(pos - label_column)
+                    # Prefer closer alignment, then earlier lines, then longer tokens
+                    score = (distance * 10) + offset
+                    scored.append((score, token))
+            if not scored:
+                return ""
+            scored.sort(key=lambda x: (x[0], -len(x[1]), -sum(ch.isalpha() for ch in x[1])))
+            return normalize(scored[0][1])
+
+        # First, try to find a value vertically aligned beneath FILE NO.
+        aligned_column_value = column_aligned_case_number()
+        if aligned_column_value:
+            return aligned_column_value
+
+        # Prefer case numbers near the CIVIL ACTION / FILE NO labels
+        for idx, line in enumerate(lines):
+            if label_re.search(line):
+                upper = line.upper()
+                # Track the earliest label position to anchor column alignment
+                positions = [upper.find(term) for term in ("CIVIL ACTION", "FILE NO") if term in upper]
+                label_column = min(p for p in positions if p >= 0) if positions else 0
+
+                # First, try to pick a token that is column-aligned beneath the label
+                aligned = aligned_candidates(idx, label_column)
+                if aligned:
+                    return aligned
+
+                # If none aligned, scan nearby lines without alignment bias
+                window = lines[idx : idx + 6]
+                candidates = []
+                for win_line in window:
+                    candidates.extend(token_candidates(win_line))
+                best = pick_best(candidates)
+                if best:
+                    return best
+
+        # Fallback: search the full joined text for a mixed letter/number token near the labels
+        m = re.search(r"(CIVIL ACTION|FILE NO\.?)[^\n]*?\n{0,1}\s*([A-Za-z0-9][A-Za-z0-9\s:\-\/.]{4,})", joined, re.IGNORECASE)
+        if m and m.group(2) and sum(ch.isdigit() for ch in m.group(2)):
+            return normalize(m.group(2))
+
+        return pick_best(list(token_candidates(joined)))
 
     def _find_case_style(self, txt):
         # Grab block around Plaintiff/Defendant
@@ -225,17 +365,23 @@ class PDFParser:
     def load(self, path):
         data = {}
         text = ""
+        first_page_text = ""
         try:
             reader = PdfReader(path)
-            for page in reader.pages:
-                text += page.extract_text() or ""
+            for idx, page in enumerate(reader.pages):
+                page_text = page.extract_text() or ""
+                if idx == 0:
+                    first_page_text = page_text
+                text += page_text
         except:
             return data
 
+        primary_text = first_page_text or text
+        raw_lines = [ln.rstrip() for ln in primary_text.splitlines()]
         # Normalize
-        normalized = re.sub(r'\s+', ' ', text)
+        normalized = re.sub(r'\s+', ' ', primary_text)
 
-        data["court_heading"] = self._find(normalized, r"IN THE .*?COURT.*")
+        data["court_heading"] = self._extract_court_heading(primary_text, raw_lines)
         data["case_number"]   = self._find(normalized, r"(CIVIL ACTION FILE NO\.?|FILE NO\.?)\s*[#:]*\s*([A-Za-z0-9\-\/\.]+)", group=2)
         data["case_style"]    = self._find(normalized, r".+?,\s*Plaintiff.*?v\.?.+?,\s*Defendant", flags=re.IGNORECASE)
         data["witness_name"]  = self._find(normalized, r"Deposition of\s+(.+?)(?=[,\.])", group=1)
@@ -250,6 +396,34 @@ class PDFParser:
         if not m:
             return ""
         return m.group(group).strip()
+
+    def _extract_court_heading(self, page_text, raw_lines):
+        """Run court heading detection once to avoid duplicated heuristics."""
+
+        heading = extract_court_heading_from_lines(raw_lines)
+        if heading:
+            return heading
+        return self._find_heading_block(page_text)
+
+    def _find_heading_block(self, text):
+        """Fallback to grab a heading block from the first page text while stopping at party metadata."""
+        snippet = text[:1200]
+        # If no explicit heading line found, try a regex anchored near COURT and stop at party labels
+        m = re.search(r"(IN\s+THE|THE)\s+[^\n]*COURT[^\n]*", snippet, re.IGNORECASE)
+        if not m:
+            return ""
+        start = m.start()
+        tail_lines = [ln.strip() for ln in snippet[start:].splitlines() if ln.strip()]
+        collected = []
+        for ln in tail_lines:
+            if COURT_HEADING_STOP_PATTERN.search(ln):
+                break
+            alpha = sum(ch.isalpha() for ch in ln)
+            lower = sum(ch.islower() for ch in ln)
+            if alpha and (lower / alpha) > 0.25 and collected:
+                break
+            collected.append(ln)
+        return " ".join(collected)
 
 
 
@@ -706,6 +880,78 @@ PDFReportBuilder._add_detail_pages = PDFReportBuilder__add_detail_pages
 
 import os
 
+
+class QCSummary:
+    """Lightweight container returned by :func:`run_qc`."""
+
+    def __init__(self, job_number, witness_name, counts):
+        self.job_number = job_number or ""
+        self.witness_name = witness_name or ""
+        self.counts = counts or {}
+
 def generate_qc_pdf_report(output_path, results_grouped, all_results):
     builder = PDFReportBuilder(output_path)
     return builder.build(results_grouped, all_results)
+
+
+# ============================
+# Module 6: Orchestrator (run_qc)
+# ============================
+
+import glob
+
+
+def _find_first(path_pattern):
+    matches = glob.glob(path_pattern)
+    return matches[0] if matches else ""
+
+
+def _derive_job_number(job_folder, txt_path):
+    # Prefer folder name digits, fall back to TXT filename digits.
+    for candidate in (job_folder, os.path.basename(txt_path)):
+        m = re.search(r"(\d+)", os.path.basename(candidate))
+        if m:
+            return m.group(1)
+    return ""
+
+
+def run_qc(job_folder):
+    """Run the full QC pipeline for the given job folder.
+
+    Returns a tuple of (QCSummary, report_path).
+    """
+
+    if not os.path.isdir(job_folder):
+        raise FileNotFoundError(f"Job folder not found: {job_folder}")
+
+    txt_path = _find_first(os.path.join(job_folder, "*.txt"))
+    if not txt_path:
+        raise FileNotFoundError("No TXT transcript found in job folder")
+
+    pdf_path = _find_first(os.path.join(job_folder, "*.pdf"))
+
+    txt_parser = TXTParser()
+    txt_data = txt_parser.load(txt_path)
+
+    pdf_parser = PDFParser()
+    pdf_data = pdf_parser.load(pdf_path) if pdf_path else {}
+
+    job_number = _derive_job_number(job_folder, txt_path)
+    rb_loader = RBLoader()
+    rb_data = rb_loader.get_job_data(job_number) if job_number else RBJobData("")
+
+    all_results = run_all_comparisons(txt_data, pdf_data, rb_data)
+    grouped = organize_results(all_results)
+
+    counts = {
+        "EXACT_MATCH": sum(1 for r in all_results if r.status == "EXACT_MATCH"),
+        "PARTIAL_MATCH": sum(1 for r in all_results if r.status == "PARTIAL_MATCH"),
+        "NO_MATCH": sum(1 for r in all_results if r.status == "NO_MATCH"),
+        "MISSING": sum(1 for r in all_results if r.status not in {"EXACT_MATCH", "PARTIAL_MATCH", "NO_MATCH"}),
+    }
+
+    report_path = os.path.join(job_folder, "QC_Report.pdf")
+    generate_qc_pdf_report(report_path, grouped, all_results)
+
+    summary = QCSummary(job_number, txt_data.title.get("witness_name"), counts)
+    return summary, report_path
